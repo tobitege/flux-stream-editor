@@ -26,7 +26,8 @@
 Whether you're livestreaming, creating content, or just having fun with AI art, this tool transforms your webcam or screen capture into stylized artwork **in real-time** with just **2 inference steps**.
 
 ### Key Highlights
-- ⚡ **Ultra-low latency**: ~50-100ms per frame with 2-step inference
+- ⚡ **Ultra-low latency**: ~66-75ms per frame on single H100 with 2-step inference
+- 🚀 **Single-GPU H100 throughput**: ~15 FPS (latest measured)
 - 🎨 **21 built-in presets**: Anime, Pixar, Ghibli, LEGO, Neon, Accessories & more
 - 🖥️ **Webcam & Screen support**: Stream your camera or entire desktop
 - 🧠 **Smart caching**: Prompt embeddings cached for repeated use
@@ -131,7 +132,7 @@ python -m realtime_editing_fast.realtime_img2img_server \
 ### Performance Tips
 
 1. **Use SageAttention**: Install `sageattention==2.2.0` for **10-15% speedup**.
-2. **Enable torch.compile**: Essential for achieving target FPS on both RTX 4090 and H100
+2. **Enable torch.compile**: Essential for reaching latest H100 throughput targets (RTX 4090 figures are old reference values)
 3. **Prompt Caching**: Same prompts reuse cached embeddings (0ms overhead)
 4. **2-Step Inference**: Perfect balance of speed & quality for real-time stylization
 
@@ -141,15 +142,15 @@ python -m realtime_editing_fast.realtime_img2img_server \
 
 ### 🎯 Measured Performance
 
-| GPU | Configuration | Infer Latency | **Infer FPS** |
-|-----|--------------|---------------|---------------|
-| **RTX 4090** | SageAttention + Compile | ~150-200ms | **5+ FPS** ✅ |
-| **RTX 4090** | Native + Compile | ~180-220ms | **4-5 FPS** |
-| **H100** | SageAttention + Compile | ~80-100ms | **10+ FPS** 🚀 |
-| **H100** | Native + Compile | ~100-120ms | **8-10 FPS** |
+| GPU | Configuration | Infer Latency | **Infer FPS** | Status |
+|-----|--------------|---------------|---------------|--------|
+| **H100 (single GPU)** | SageAttention + Compile (Transformer + VAE Encode + VAE Decode) | ~66-75ms | **~15 FPS** 🚀 | **Latest** |
+| **H100** | Native + Compile | ~100-120ms | **8-10 FPS** | Old |
+| **RTX 4090** | SageAttention + Compile | ~150-200ms | **5+ FPS** | **Old** |
+| **RTX 4090** | Native + Compile | ~180-220ms | **4-5 FPS** | **Old** |
 
-> ✅ **RTX 4090**: Measured **Infer FPS 5+**  
-> 🚀 **H100**: Measured **Infer FPS 10+**
+> 🚀 **Latest**: Single H100 measured around **15 FPS** at 2-step inference.  
+> 🕘 **Old reference**: RTX 4090 numbers are kept for historical comparison.
 
 
 *Note: First inference includes model loading (~10s) and torch.compile warmup (~5-10s). Subsequent requests achieve full speed.*

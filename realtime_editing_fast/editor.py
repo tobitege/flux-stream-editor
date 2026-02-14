@@ -37,6 +37,21 @@ def _parse_steps_mask(mask_text: str, expected_steps: int) -> list[int]:
     return mask
 
 
+def _parse_resample_mode(mode: str) -> Image.Resampling:
+    value = (mode or "").strip().lower()
+    mapping = {
+        "nearest": Image.Resampling.NEAREST,
+        "box": Image.Resampling.BOX,
+        "bilinear": Image.Resampling.BILINEAR,
+        "hamming": Image.Resampling.HAMMING,
+        "bicubic": Image.Resampling.BICUBIC,
+        "lanczos": Image.Resampling.LANCZOS,
+    }
+    if value not in mapping:
+        raise ValueError(f"Unsupported preprocess resample mode: {mode}")
+    return mapping[value]
+
+
 @dataclass(slots=True)
 class FastFlux2Config:
     model_id: str = "black-forest-labs/FLUX.2-klein-4B"
@@ -70,6 +85,21 @@ class FastFlux2Config:
     compile_transformer: bool = True
     compile_disable_cudagraphs: bool = True
     input_resize_mode: str = "equivalent_area"  # "equivalent_area" keeps aspect ratio with ~512x512 pixel area.
+    preprocess_fast_tensor: bool = True
+    preprocess_resample: str = "bilinear"
+    preprocess_pin_memory: bool = True
+    preprocess_non_blocking_h2d: bool = True
+    cache_timesteps: bool = True
+    cache_image_latent_ids: bool = True
+    enable_vae_encoder_compile: bool = True
+    vae_encoder_compile_mode: str = "reduce-overhead"
+    vae_encoder_compile_disable_cudagraphs: bool = True
+    enable_vae_decoder_compile: bool = True
+    vae_decoder_compile_mode: str = "reduce-overhead"
+    vae_decoder_compile_disable_cudagraphs: bool = True
+    vae_decoder_channels_last: bool = False
+    vae_decoder_input_channels_last: bool = False
+    profile_stage_timing: bool = False
     verbose: bool = True
 
     @property
@@ -92,6 +122,10 @@ class FastFlux2RealtimeEditor:
         self._cached_prompt_embeds: Optional[torch.Tensor] = None
         self._cached_text_ids: Optional[torch.Tensor] = None
         self._request_idx = 0
+        self._vae_encode_fn = None
+        self._vae_decode_fn = None
+        self._timesteps_cache: dict[tuple[int, int, str], torch.Tensor] = {}
+        self._image_latent_ids_cache: dict[tuple[int, int, str], torch.Tensor] = {}
 
     @property
     def is_loaded(self) -> bool:
@@ -103,7 +137,9 @@ class FastFlux2RealtimeEditor:
         ts = time.strftime("%H:%M:%S")
         print(f"*** [FastFlux2][{ts}] {msg}", flush=True)
 
-    def _sync_if_cuda(self) -> None:
+    def _sync_if_cuda(self, force: bool = False) -> None:
+        if not (force or self.config.profile_stage_timing):
+            return
         if self.config.runtime_device.startswith("cuda") and torch.cuda.is_available():
             torch.cuda.synchronize()
 
@@ -179,8 +215,46 @@ class FastFlux2RealtimeEditor:
                 pipe.transformer = torch.compile(pipe.transformer, **compile_kwargs)
                 self._log(f"transformer compiled: kwargs={compile_kwargs}")
 
+            if cfg.vae_decoder_channels_last:
+                pipe.vae.decoder.to(memory_format=torch.channels_last)
+                self._log("vae decoder memory_format=channels_last")
+
+            def _encode_fn(image: torch.Tensor, generator: torch.Generator) -> torch.Tensor:
+                return pipe._encode_vae_image(image=image, generator=generator)
+
+            if cfg.enable_vae_encoder_compile:
+                if cfg.vae_encoder_compile_disable_cudagraphs:
+                    encode_compile_kwargs = {"fullgraph": False, "options": {"triton.cudagraphs": False}}
+                else:
+                    encode_compile_kwargs = {"mode": cfg.vae_encoder_compile_mode, "fullgraph": False}
+                try:
+                    self._vae_encode_fn = torch.compile(_encode_fn, **encode_compile_kwargs)
+                    self._log(f"vae encoder compiled: kwargs={encode_compile_kwargs}")
+                except Exception as exc:
+                    self._vae_encode_fn = _encode_fn
+                    self._log(f"vae encoder compile fallback to eager: {exc!r}")
+            else:
+                self._vae_encode_fn = _encode_fn
+
+            def _decode_fn(latents: torch.Tensor) -> torch.Tensor:
+                return pipe.vae.decode(latents, return_dict=False)[0]
+
+            if cfg.enable_vae_decoder_compile:
+                if cfg.vae_decoder_compile_disable_cudagraphs:
+                    decode_compile_kwargs = {"fullgraph": False, "options": {"triton.cudagraphs": False}}
+                else:
+                    decode_compile_kwargs = {"mode": cfg.vae_decoder_compile_mode, "fullgraph": False}
+                try:
+                    self._vae_decode_fn = torch.compile(_decode_fn, **decode_compile_kwargs)
+                    self._log(f"vae decoder compiled: kwargs={decode_compile_kwargs}")
+                except Exception as exc:
+                    self._vae_decode_fn = _decode_fn
+                    self._log(f"vae decoder compile fallback to eager: {exc!r}")
+            else:
+                self._vae_decode_fn = _decode_fn
+
             self._pipe = pipe
-            self._sync_if_cuda()
+            self._sync_if_cuda(force=True)
             self._log(f"model init done: {(time.perf_counter() - init_t0) * 1000.0:.1f} ms")
 
     def _enable_cache_dit(self, pipe) -> None:
@@ -298,9 +372,118 @@ class FastFlux2RealtimeEditor:
         )
         latents = latents * latents_bn_std + latents_bn_mean
         latents = pipe._unpatchify_latents(latents)
+        if self.config.vae_decoder_input_channels_last:
+            latents = latents.contiguous(memory_format=torch.channels_last)
 
-        image = pipe.vae.decode(latents, return_dict=False)[0]
+        if self._vae_decode_fn is None:
+            image = pipe.vae.decode(latents, return_dict=False)[0]
+        else:
+            image = self._vae_decode_fn(latents)
         return pipe.image_processor.postprocess(image, output_type="pil")[0]
+
+    def _preprocess_image_tensor(
+        self,
+        image_for_preprocess: Image.Image,
+        target_h: int,
+        target_w: int,
+        resize_mode: str,
+    ) -> torch.Tensor:
+        pipe = self._pipe
+        cfg = self.config
+        assert pipe is not None
+
+        if not cfg.preprocess_fast_tensor:
+            return pipe.image_processor.preprocess(
+                image_for_preprocess,
+                height=target_h,
+                width=target_w,
+                resize_mode=resize_mode,
+            )
+
+        if image_for_preprocess.size != (target_w, target_h):
+            image_for_preprocess = image_for_preprocess.resize(
+                (target_w, target_h),
+                _parse_resample_mode(cfg.preprocess_resample),
+            )
+
+        arr = np.array(image_for_preprocess, dtype=np.uint8, copy=True)
+        image_tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)
+        image_tensor = image_tensor.to(torch.float32).div_(127.5).sub_(1.0)
+
+        if cfg.preprocess_pin_memory and torch.cuda.is_available():
+            image_tensor = image_tensor.pin_memory()
+        return image_tensor
+
+    def _prepare_image_latents_fast(
+        self,
+        image_tensor: torch.Tensor,
+        generator: torch.Generator,
+        batch_size: int = 1,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        pipe = self._pipe
+        cfg = self.config
+        assert pipe is not None
+
+        non_blocking = bool(cfg.preprocess_non_blocking_h2d)
+        image = image_tensor.to(
+            device=pipe._execution_device,
+            dtype=pipe.vae.dtype,
+            non_blocking=non_blocking,
+        )
+        if self._vae_encode_fn is None:
+            image_latent = pipe._encode_vae_image(image=image, generator=generator)
+        else:
+            try:
+                image_latent = self._vae_encode_fn(image=image, generator=generator)
+            except Exception as exc:
+                self._log(f"vae encoder compiled path failed, fallback to eager: {exc!r}")
+                self._vae_encode_fn = None
+                image_latent = pipe._encode_vae_image(image=image, generator=generator)
+        packed_latent = pipe._pack_latents(image_latent)
+        if batch_size != 1:
+            packed_latent = packed_latent.repeat(batch_size, 1, 1)
+
+        image_latent_h = int(image_latent.shape[-2])
+        image_latent_w = int(image_latent.shape[-1])
+        latent_ids_cache_key = (image_latent_h, image_latent_w, str(pipe._execution_device))
+        if cfg.cache_image_latent_ids and latent_ids_cache_key in self._image_latent_ids_cache:
+            image_latent_ids = self._image_latent_ids_cache[latent_ids_cache_key]
+        else:
+            image_latent_ids = pipe._prepare_image_ids([image_latent]).to(
+                pipe._execution_device,
+                non_blocking=non_blocking,
+            )
+            if cfg.cache_image_latent_ids:
+                self._image_latent_ids_cache[latent_ids_cache_key] = image_latent_ids
+
+        if batch_size != 1:
+            image_latent_ids = image_latent_ids.repeat(batch_size, 1, 1)
+        return packed_latent, image_latent_ids
+
+    def _get_timesteps_for_latent_seq_len(self, image_seq_len: int) -> torch.Tensor:
+        pipe = self._pipe
+        cfg = self.config
+        assert pipe is not None
+
+        cache_key = (int(image_seq_len), int(cfg.num_inference_steps), str(pipe._execution_device))
+        if cfg.cache_timesteps and cache_key in self._timesteps_cache:
+            return self._timesteps_cache[cache_key]
+
+        sigmas = np.linspace(1.0, 1.0 / cfg.num_inference_steps, cfg.num_inference_steps)
+        if hasattr(pipe.scheduler.config, "use_flow_sigmas") and pipe.scheduler.config.use_flow_sigmas:
+            sigmas = None
+
+        mu = compute_empirical_mu(image_seq_len=image_seq_len, num_steps=cfg.num_inference_steps)
+        timesteps, _ = retrieve_timesteps(
+            pipe.scheduler,
+            cfg.num_inference_steps,
+            pipe._execution_device,
+            sigmas=sigmas,
+            mu=mu,
+        )
+        if cfg.cache_timesteps:
+            self._timesteps_cache[cache_key] = timesteps
+        return timesteps
 
     def _prepare_inputs(
         self,
@@ -317,6 +500,7 @@ class FastFlux2RealtimeEditor:
         image = image.convert("RGB")
         source_size = image.size
         multiple = int(pipe.vae_scale_factor * 2)
+        resample = _parse_resample_mode(cfg.preprocess_resample)
         target_area = int(cfg.width * cfg.height)
         if cfg.input_resize_mode == "equivalent_area":
             proc_w, proc_h = self._compute_equivalent_resolution(
@@ -325,7 +509,7 @@ class FastFlux2RealtimeEditor:
                 target_area=target_area,
                 multiple=multiple,
             )
-            image_for_preprocess = image.resize((proc_w, proc_h), Image.Resampling.BICUBIC)
+            image_for_preprocess = image.resize((proc_w, proc_h), resample)
             resize_mode = "crop"  # no crop happens because image already matches target size.
             target_w, target_h = proc_w, proc_h
         elif cfg.input_resize_mode == "crop":
@@ -333,7 +517,7 @@ class FastFlux2RealtimeEditor:
             resize_mode = "crop"
             target_w, target_h = cfg.width, cfg.height
         elif cfg.input_resize_mode == "pad":
-            contained = ImageOps.contain(image, (cfg.width, cfg.height), method=Image.Resampling.BICUBIC)
+            contained = ImageOps.contain(image, (cfg.width, cfg.height), method=resample)
             canvas = Image.new("RGB", (cfg.width, cfg.height), (0, 0, 0))
             offset = ((cfg.width - contained.width) // 2, (cfg.height - contained.height) // 2)
             canvas.paste(contained, offset)
@@ -343,10 +527,10 @@ class FastFlux2RealtimeEditor:
         else:
             raise ValueError(f"Unsupported input_resize_mode: {cfg.input_resize_mode}")
 
-        image_tensor = pipe.image_processor.preprocess(
+        image_tensor = self._preprocess_image_tensor(
             image_for_preprocess,
-            height=target_h,
-            width=target_w,
+            target_h=target_h,
+            target_w=target_w,
             resize_mode=resize_mode,
         )
 
@@ -364,27 +548,14 @@ class FastFlux2RealtimeEditor:
             latents=None,
         )
 
-        image_latents, image_latent_ids = pipe.prepare_image_latents(
-            images=[image_tensor],
-            batch_size=1,
+        image_latents, image_latent_ids = self._prepare_image_latents_fast(
+            image_tensor=image_tensor,
             generator=generator,
-            device=pipe._execution_device,
-            dtype=pipe.vae.dtype,
+            batch_size=1,
         )
-
-        sigmas = np.linspace(1.0, 1.0 / cfg.num_inference_steps, cfg.num_inference_steps)
-        if hasattr(pipe.scheduler.config, "use_flow_sigmas") and pipe.scheduler.config.use_flow_sigmas:
-            sigmas = None
 
         image_seq_len = latents.shape[1]
-        mu = compute_empirical_mu(image_seq_len=image_seq_len, num_steps=cfg.num_inference_steps)
-        timesteps, _ = retrieve_timesteps(
-            pipe.scheduler,
-            cfg.num_inference_steps,
-            pipe._execution_device,
-            sigmas=sigmas,
-            mu=mu,
-        )
+        timesteps = self._get_timesteps_for_latent_seq_len(image_seq_len=image_seq_len)
 
         return {
             "latents": latents,
@@ -425,19 +596,8 @@ class FastFlux2RealtimeEditor:
             latents=None,
         )
 
-        sigmas = np.linspace(1.0, 1.0 / cfg.num_inference_steps, cfg.num_inference_steps)
-        if hasattr(pipe.scheduler.config, "use_flow_sigmas") and pipe.scheduler.config.use_flow_sigmas:
-            sigmas = None
-
         image_seq_len = latents.shape[1]
-        mu = compute_empirical_mu(image_seq_len=image_seq_len, num_steps=cfg.num_inference_steps)
-        timesteps, _ = retrieve_timesteps(
-            pipe.scheduler,
-            cfg.num_inference_steps,
-            pipe._execution_device,
-            sigmas=sigmas,
-            mu=mu,
-        )
+        timesteps = self._get_timesteps_for_latent_seq_len(image_seq_len=image_seq_len)
 
         return {
             "latents": latents,

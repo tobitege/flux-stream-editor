@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import os
 import secrets
 from dataclasses import replace
 from io import BytesIO
@@ -20,6 +21,13 @@ from .editor import FastFlux2Config, FastFlux2RealtimeEditor
 DEFAULT_PROMPT = "A cinematic photo of a corgi astronaut walking on Mars at golden hour."
 ATTENTION_BACKEND_CHOICES = ["sage", "native", "none", "sage_hub"]
 STATIC_DIR = Path(__file__).resolve().parent / "static" / "realtime_txt2img"
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 class LoadInputModel(BaseModel):
@@ -135,6 +143,17 @@ class RealtimeTxt2ImgApi:
 
 
 def build_default_config(attention_backend: str = "sage") -> FastFlux2Config:
+    profile_stage_timing = os.getenv("FLUX_PROFILE_STAGE", "0") == "1"
+    enable_vae_decoder_compile = _env_bool("FLUX_VAE_DECODE_COMPILE", True)
+    vae_decoder_compile_disable_cudagraphs = _env_bool("FLUX_VAE_DECODE_DISABLE_CUDAGRAPHS", False)
+    vae_decoder_channels_last = _env_bool("FLUX_VAE_DECODE_CHANNELS_LAST", False)
+    vae_decoder_input_channels_last = _env_bool("FLUX_VAE_DECODE_INPUT_CHANNELS_LAST", False)
+    vae_decoder_compile_mode = os.getenv("FLUX_VAE_DECODE_COMPILE_MODE", "reduce-overhead").strip() or "reduce-overhead"
+    enable_vae_encoder_compile = _env_bool("FLUX_VAE_ENCODE_COMPILE", True)
+    vae_encoder_compile_disable_cudagraphs = _env_bool("FLUX_VAE_ENCODE_DISABLE_CUDAGRAPHS", True)
+    vae_encoder_compile_mode = os.getenv("FLUX_VAE_ENCODE_COMPILE_MODE", "reduce-overhead").strip() or "reduce-overhead"
+    cache_timesteps = _env_bool("FLUX_CACHE_TIMESTEPS", True)
+    cache_image_latent_ids = _env_bool("FLUX_CACHE_IMAGE_LATENT_IDS", True)
     return FastFlux2Config(
         attention_backend=attention_backend,
         width=512,
@@ -153,6 +172,17 @@ def build_default_config(attention_backend: str = "sage") -> FastFlux2Config:
         taylorseer_order=1,
         compile_transformer=True,
         compile_disable_cudagraphs=True,
+        cache_timesteps=cache_timesteps,
+        cache_image_latent_ids=cache_image_latent_ids,
+        enable_vae_encoder_compile=enable_vae_encoder_compile,
+        vae_encoder_compile_mode=vae_encoder_compile_mode,
+        vae_encoder_compile_disable_cudagraphs=vae_encoder_compile_disable_cudagraphs,
+        enable_vae_decoder_compile=enable_vae_decoder_compile,
+        vae_decoder_compile_mode=vae_decoder_compile_mode,
+        vae_decoder_compile_disable_cudagraphs=vae_decoder_compile_disable_cudagraphs,
+        vae_decoder_channels_last=vae_decoder_channels_last,
+        vae_decoder_input_channels_last=vae_decoder_input_channels_last,
+        profile_stage_timing=profile_stage_timing,
     )
 
 
