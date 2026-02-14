@@ -11,10 +11,11 @@
   <b>Turn your webcam into a real-time AI art studio.</b>
 </p>
 
+<p align="center">
+  <img src="assets/demo.gif" width="900" alt="Demo GIF">
+</p>
 
-<!-- <p align="center">
-  <img src="https://via.placeholder.com/800x400/0f1115/7ec4ff?text=Demo+GIF+Placeholder" width="800" alt="Demo">
-</p> -->
+
 
 ---
 
