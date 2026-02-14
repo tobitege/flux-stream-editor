@@ -15,11 +15,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .editor import FastFlux2Config, FastFlux2RealtimeEditor
+from .editor import FastFlux2Config, FastFlux2RealtimeEditor, normalize_attention_backend_name
 
 
 DEFAULT_PROMPT = "A cinematic photo of a corgi astronaut walking on Mars at golden hour."
-ATTENTION_BACKEND_CHOICES = ["sage", "native", "none", "sage_hub"]
+ATTENTION_BACKEND_CHOICES = ["auto", "sage", "native", "none", "sage_hub", "_flash_3", "fa3"]
 STATIC_DIR = Path(__file__).resolve().parent / "static" / "realtime_txt2img"
 
 
@@ -31,7 +31,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 class LoadInputModel(BaseModel):
-    attention_backend: str = Field(default="sage")
+    attention_backend: str = Field(default="auto")
 
 
 class LoadResponseModel(BaseModel):
@@ -70,10 +70,7 @@ class RealtimeTxt2ImgApi:
 
     @staticmethod
     def _normalize_attention_backend(attention_backend: str) -> str:
-        value = (attention_backend or "").strip().lower()
-        if not value:
-            return "sage"
-        return value
+        return normalize_attention_backend_name(attention_backend)
 
     @staticmethod
     def _pil_to_base64(image, format: str = "JPEG") -> str:
@@ -142,7 +139,8 @@ class RealtimeTxt2ImgApi:
         self.app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="frontend")
 
 
-def build_default_config(attention_backend: str = "sage") -> FastFlux2Config:
+def build_default_config(attention_backend: str = "auto") -> FastFlux2Config:
+    attention_backend = normalize_attention_backend_name(attention_backend)
     profile_stage_timing = os.getenv("FLUX_PROFILE_STAGE", "0") == "1"
     enable_vae_decoder_compile = _env_bool("FLUX_VAE_DECODE_COMPILE", True)
     vae_decoder_compile_disable_cudagraphs = _env_bool("FLUX_VAE_DECODE_DISABLE_CUDAGRAPHS", False)
@@ -194,7 +192,7 @@ def main() -> None:
     parser.add_argument(
         "--attention-backend",
         choices=ATTENTION_BACKEND_CHOICES,
-        default="sage",
+        default="auto",
     )
     args = parser.parse_args()
 

@@ -171,12 +171,28 @@ Also integrated into external benchmark harness:
 
 Default config now enables compile across critical modules:
 
+- attention backend: `auto` (priority: `FA3 > Sage > Native`)
 - transformer compile: `on`
 - VAE decoder compile: `on`
 - VAE encoder compile: `on`
 - timestep/image-latent-id caches: `on`
 
-All remain runtime-overridable via env flags.
+All remain runtime-overridable via env flags and API/CLI backend arguments.
+
+## 6.1 Attention Backend Selection (Current Recommended)
+
+Backend strategy in server/editor is now:
+
+1. try FA3 (`_flash_3`, alias: `fa3`)
+2. fallback to `sage`
+3. fallback to `native`
+
+Implementation details:
+
+- backend aliases normalized in `editor.py`
+- auto-selection done at model load time
+- runtime response reports the actual loaded backend
+- FA3 compatibility wrapper is applied for current Diffusers + `flash_attn_3` interface shape
 
 ## 7. Benchmark Results (Representative)
 
@@ -199,11 +215,67 @@ Delta (on vs off):
 - `-8.38ms` end-to-end
 - `+1.68 FPS` (about `+12.6%`)
 
-### 7.2 Earlier decoder compile impact (same workload family)
+### 7.2 Best-Config Stage Breakdown (Current)
+
+Best config:
+
+- `attention_backend=sage`
+- `num_inference_steps=2`
+- transformer compile: `on`
+- VAE encoder compile: `on`
+- VAE decoder compile: `on`
+- timestep/image-latent-id cache: `on`
+
+Clean API-level breakdown (`warmup=5`, `runs=30`):
+
+| Stage | avg latency (ms) | share of total |
+|---|---:|---:|
+| `prepare` | 12.60 | 18.9% |
+| `denoise` | 36.10 | 54.3% |
+| `decode` | 17.82 | 26.8% |
+| `server_total` | 66.52 | 100.0% |
+
+Derived throughput:
+
+- **15.03 FPS** (`1000 / 66.52`)
+
+### 7.5 Latest FA3 vs Sage External A/B (Single GPU)
+
+External harness:
+
+- `tests/test_vae_decode_accel_external.py`
+- `warmup=3`, `runs=5`, `num_inference_steps=2`
+
+Results:
+
+| Backend | avg server total (ms) | avg prepare (ms) | avg denoise (ms) | avg decode (ms) | FPS |
+|---|---:|---:|---:|---:|---:|
+| `sage` | 79.03 | 21.95 | 36.90 | 20.18 | 12.65 |
+| `_flash_3` (FA3) | 64.49 | 13.30 | 33.70 | 17.49 | 15.51 |
+
+Additional user-side steady-state measurement:
+
+- **FA3 reached 15.6 FPS** on single GPU in realtime run.
+
+Decision:
+
+- recommend `auto` (which prefers FA3), and use `fa3` explicitly when pinning backend for controlled experiments.
+
+Diagnostic profile split (`FLUX_PROFILE_STAGE=1`, sync-instrumented; use for attribution, not direct SLO):
+
+| Prepare sub-stage | avg latency (ms) |
+|---|---:|
+| `preprocess_cpu` | 0.56 |
+| `h2d` | 2.38 |
+| `vae_encode` | 12.47 |
+| `pack_cond` | 0.76 |
+| `timesteps` | 1.16 |
+
+### 7.3 Earlier decoder compile impact (same workload family)
 
 Decoder compile reduced decode stage from ~31ms class to ~18ms class and contributed the largest single-stage gain before encoder compile was introduced.
 
-### 7.3 Prepare cache impact
+### 7.4 Prepare cache impact
 
 With cache toggles enabled, prepare overhead and variance dropped versus no-cache runs under the same workload shape.
 
@@ -232,7 +304,15 @@ Implication:
 ## 9.1 Start server (defaults compile-enabled)
 
 ```bash
-python -m realtime_editing_fast.realtime_img2img_server --host 127.0.0.1 --port 6006 --num-inference-steps 2
+CUDA_VISIBLE_DEVICES=1 python -m realtime_editing_fast.realtime_img2img_server --host 127.0.0.1 --port 6006 --num-inference-steps 2
+```
+
+`--attention-backend` default is `auto` (priority: FA3 > Sage > Native).
+
+## 9.1.1 Force FA3
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -m realtime_editing_fast.realtime_img2img_server --host 127.0.0.1 --port 6006 --num-inference-steps 2 --attention-backend fa3
 ```
 
 ## 9.2 Force-disable encoder compile
@@ -264,4 +344,3 @@ Given the observed bottleneck distribution, low-level path optimization (compile
    - soak tests
    - process lifecycle stress tests
    - add automated fallback on repeated runtime faults.
-

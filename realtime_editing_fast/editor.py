@@ -11,6 +11,24 @@ import torch
 from diffusers import AutoPipelineForImage2Image
 from diffusers.pipelines.flux2.pipeline_flux2_klein import compute_empirical_mu, retrieve_timesteps
 
+ATTENTION_BACKEND_ALIASES = {
+    "fa3": "_flash_3",
+    "flash3": "_flash_3",
+    "flash_attn_3": "_flash_3",
+    "flash-attn-3": "_flash_3",
+    "flash_attention_3": "_flash_3",
+    "default": "auto",
+}
+FA3_BACKENDS = {"_flash_3", "_flash_varlen_3"}
+AUTO_ATTENTION_BACKENDS = {"auto"}
+
+
+def normalize_attention_backend_name(name: str) -> str:
+    value = (name or "").strip().lower()
+    if not value:
+        return "auto"
+    return ATTENTION_BACKEND_ALIASES.get(value, value)
+
 
 def _parse_dtype(dtype_name: str) -> torch.dtype:
     name = dtype_name.lower()
@@ -58,7 +76,7 @@ class FastFlux2Config:
     device: str = "cuda"
     gpu_id: int = 0
     dtype: str = "bfloat16"
-    attention_backend: str = "sage"
+    attention_backend: str = "auto"
     width: int = 512
     height: int = 512
     num_inference_steps: int = 2
@@ -126,6 +144,8 @@ class FastFlux2RealtimeEditor:
         self._vae_decode_fn = None
         self._timesteps_cache: dict[tuple[int, int, str], torch.Tensor] = {}
         self._image_latent_ids_cache: dict[tuple[int, int, str], torch.Tensor] = {}
+        self._fa3_probe_result: tuple[bool, str] | None = None
+        self._fa3_dispatch_wrapper_ready: bool = False
 
     @property
     def is_loaded(self) -> bool:
@@ -164,6 +184,130 @@ class FastFlux2RealtimeEditor:
         proc_h = self._round_to_multiple(src_h * scale, multiple)
         return proc_w, proc_h
 
+    def _probe_fa3_interface_compatibility(
+        self,
+        runtime_device: str,
+        dtype: torch.dtype,
+    ) -> tuple[bool, str]:
+        if self._fa3_probe_result is not None:
+            return self._fa3_probe_result
+
+        if not runtime_device.startswith("cuda"):
+            self._fa3_probe_result = (False, f"runtime_device={runtime_device} is not CUDA.")
+            return self._fa3_probe_result
+
+        if not torch.cuda.is_available():
+            self._fa3_probe_result = (False, "torch.cuda.is_available() is False.")
+            return self._fa3_probe_result
+
+        if not self._fa3_dispatch_wrapper_ready:
+            self._fa3_probe_result = (False, "FA3 dispatch wrapper is not ready.")
+            return self._fa3_probe_result
+
+        try:
+            from diffusers.models import attention_dispatch as ad
+        except Exception as exc:
+            self._fa3_probe_result = (False, f"import diffusers attention_dispatch failed: {exc!r}")
+            return self._fa3_probe_result
+
+        fa3_func = getattr(ad, "flash_attn_3_func", None)
+        if fa3_func is None:
+            self._fa3_probe_result = (False, "attention_dispatch.flash_attn_3_func is None.")
+            return self._fa3_probe_result
+
+        probe_dtype = dtype if dtype in (torch.bfloat16, torch.float16) else torch.bfloat16
+        try:
+            q = torch.randn((1, 1, 1, 64), device=runtime_device, dtype=probe_dtype)
+            out = fa3_func(q=q, k=q, v=q, causal=False)
+            if isinstance(out, tuple) and len(out) >= 2:
+                self._fa3_probe_result = (True, "ok")
+                return self._fa3_probe_result
+            self._fa3_probe_result = (
+                False,
+                "patched attention_dispatch.flash_attn_3_func return is not tuple(out, lse, ...).",
+            )
+            return self._fa3_probe_result
+        except Exception as exc:
+            self._fa3_probe_result = (False, f"FA3 probe call failed: {exc!r}")
+            return self._fa3_probe_result
+
+    def _maybe_patch_diffusers_fa3_dispatch(self) -> tuple[bool, str]:
+        if self._fa3_dispatch_wrapper_ready:
+            return True, "already_patched"
+
+        try:
+            from diffusers.models import attention_dispatch as ad
+        except Exception as exc:
+            return False, f"import diffusers attention_dispatch failed: {exc!r}"
+
+        if getattr(ad, "_flux_fa3_wrapper_installed", False):
+            self._fa3_dispatch_wrapper_ready = True
+            return True, "already_patched_global"
+
+        base_fa3_func = getattr(ad, "flash_attn_3_func", None)
+        base_fa3_varlen_func = getattr(ad, "flash_attn_3_varlen_func", None)
+        if base_fa3_func is None or base_fa3_varlen_func is None:
+            return False, "diffusers attention_dispatch missing FA3 function hooks."
+
+        def _ensure_tuple_output(base_fn):
+            def wrapped(*args, **kwargs):
+                patched_kwargs = dict(kwargs)
+                patched_kwargs.setdefault("return_attn_probs", True)
+                out = base_fn(*args, **patched_kwargs)
+                if isinstance(out, tuple):
+                    return out
+                if isinstance(out, torch.Tensor):
+                    lse = torch.empty((0,), device=out.device, dtype=torch.float32)
+                    return (out, lse)
+                return out
+
+            return wrapped
+
+        ad.flash_attn_3_func = _ensure_tuple_output(base_fa3_func)
+        ad.flash_attn_3_varlen_func = _ensure_tuple_output(base_fa3_varlen_func)
+        ad._flux_fa3_wrapper_installed = True
+        self._fa3_dispatch_wrapper_ready = True
+        return True, "patched"
+
+    def _try_set_attention_backend(self, pipe, backend: str) -> tuple[bool, str]:
+        if not hasattr(pipe.transformer, "set_attention_backend"):
+            return False, "Current transformer does not support set_attention_backend()."
+        try:
+            pipe.transformer.set_attention_backend(backend)
+            return True, "ok"
+        except Exception as exc:
+            return False, repr(exc)
+
+    def _auto_select_attention_backend(
+        self,
+        pipe,
+        runtime_device: str,
+        dtype: torch.dtype,
+    ) -> str:
+        for candidate in ("_flash_3", "sage", "native"):
+            if candidate in FA3_BACKENDS:
+                wrapped_ok, wrapped_reason = self._maybe_patch_diffusers_fa3_dispatch()
+                if not wrapped_ok:
+                    self._log(f"attention backend candidate skipped: {candidate}, reason={wrapped_reason}")
+                    continue
+
+                fa3_ok, fa3_reason = self._probe_fa3_interface_compatibility(
+                    runtime_device=runtime_device,
+                    dtype=dtype,
+                )
+                if not fa3_ok:
+                    self._log(f"attention backend candidate skipped: {candidate}, reason={fa3_reason}")
+                    continue
+
+            ok, reason = self._try_set_attention_backend(pipe, candidate)
+            if ok:
+                self._log(f"attention backend auto-selected: {candidate}")
+                return candidate
+            self._log(f"attention backend candidate skipped: {candidate}, reason={reason}")
+
+        self._log("attention backend auto-selection failed; using model default/native behavior.")
+        return "native"
+
     def ensure_loaded(self) -> None:
         if self._pipe is not None:
             return
@@ -188,17 +332,66 @@ class FastFlux2RealtimeEditor:
             pipe = AutoPipelineForImage2Image.from_pretrained(cfg.model_id, torch_dtype=dtype)
             pipe = pipe.to(runtime_device)
             pipe.set_progress_bar_config(disable=True)
-            requested_attention_backend = cfg.attention_backend.strip().lower()
-            if requested_attention_backend not in ("", "none", "default", "auto"):
+            requested_attention_backend = normalize_attention_backend_name(cfg.attention_backend)
+            if requested_attention_backend in AUTO_ATTENTION_BACKENDS:
+                selected_backend = self._auto_select_attention_backend(
+                    pipe=pipe,
+                    runtime_device=runtime_device,
+                    dtype=dtype,
+                )
+                cfg.attention_backend = selected_backend
+            elif requested_attention_backend not in ("", "none"):
+                if requested_attention_backend in FA3_BACKENDS:
+                    wrapped_ok, wrapped_reason = self._maybe_patch_diffusers_fa3_dispatch()
+                    if wrapped_ok:
+                        self._log(f"FA3 dispatch wrapper status: {wrapped_reason}")
+                    else:
+                        self._log(f"FA3 dispatch wrapper failed: {wrapped_reason}")
+
+                    fa3_ok, fa3_reason = self._probe_fa3_interface_compatibility(
+                        runtime_device=runtime_device,
+                        dtype=dtype,
+                    )
+                    if not fa3_ok:
+                        fallback_backend = "sage"
+                        self._log(
+                            "FA3 backend probe failed; fallback to "
+                            f"{fallback_backend}. reason={fa3_reason}"
+                        )
+                        requested_attention_backend = fallback_backend
+
                 if not hasattr(pipe.transformer, "set_attention_backend"):
                     raise RuntimeError("Current transformer does not support set_attention_backend().")
                 try:
                     pipe.transformer.set_attention_backend(requested_attention_backend)
+                    cfg.attention_backend = requested_attention_backend
                     self._log(f"attention backend set: {requested_attention_backend}")
                 except Exception as exc:
-                    raise RuntimeError(
-                        f"Failed to set attention backend to '{requested_attention_backend}'."
-                    ) from exc
+                    if requested_attention_backend in FA3_BACKENDS:
+                        for fallback_backend in ("sage", "native"):
+                            if fallback_backend == requested_attention_backend:
+                                continue
+                            try:
+                                pipe.transformer.set_attention_backend(fallback_backend)
+                                cfg.attention_backend = fallback_backend
+                                self._log(
+                                    "attention backend fallback set: "
+                                    f"{requested_attention_backend} -> {fallback_backend}"
+                                )
+                                break
+                            except Exception:
+                                continue
+                        else:
+                            raise RuntimeError(
+                                f"Failed to set attention backend to '{requested_attention_backend}'."
+                            ) from exc
+                        self._log(f"attention backend set failed for FA3: {exc!r}")
+                    else:
+                        raise RuntimeError(
+                            f"Failed to set attention backend to '{requested_attention_backend}'."
+                        ) from exc
+            else:
+                cfg.attention_backend = requested_attention_backend
 
             if cfg.enable_cache_dit:
                 self._enable_cache_dit(pipe)

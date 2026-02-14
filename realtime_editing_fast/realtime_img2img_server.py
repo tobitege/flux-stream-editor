@@ -17,11 +17,11 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from .editor import FastFlux2Config, FastFlux2RealtimeEditor
+from .editor import FastFlux2Config, FastFlux2RealtimeEditor, normalize_attention_backend_name
 
 
 DEFAULT_PROMPT = "Convert this live frame into a cinematic anime illustration with clean lines and rich color."
-ATTENTION_BACKEND_CHOICES = ["sage", "native", "none", "sage_hub"]
+ATTENTION_BACKEND_CHOICES = ["auto", "sage", "native", "none", "sage_hub", "_flash_3", "fa3"]
 STATIC_DIR = Path(__file__).resolve().parent / "static" / "realtime_img2img"
 
 
@@ -87,10 +87,7 @@ class RealtimeImg2ImgApi:
 
     @staticmethod
     def _normalize_attention_backend(attention_backend: str) -> str:
-        value = (attention_backend or "").strip().lower()
-        if not value:
-            return "sage"
-        return value
+        return normalize_attention_backend_name(attention_backend)
 
     @staticmethod
     def _resolve_seed(seed: int) -> int:
@@ -199,7 +196,8 @@ class RealtimeImg2ImgApi:
         self.app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="frontend")
 
 
-def build_default_config(attention_backend: str = "sage", num_inference_steps: int = 2) -> FastFlux2Config:
+def build_default_config(attention_backend: str = "auto", num_inference_steps: int = 2) -> FastFlux2Config:
+    attention_backend = normalize_attention_backend_name(attention_backend)
     steps_mask = "10" if int(num_inference_steps) == 2 else "1" * int(num_inference_steps)
     profile_stage_timing = os.getenv("FLUX_PROFILE_STAGE", "0") == "1"
     enable_vae_decoder_compile = _env_bool("FLUX_VAE_DECODE_COMPILE", True)
@@ -252,7 +250,7 @@ def main() -> None:
     parser.add_argument(
         "--attention-backend",
         choices=ATTENTION_BACKEND_CHOICES,
-        default="native",
+        default="auto",
     )
     parser.add_argument("--num-inference-steps", type=int, default=2)
     args = parser.parse_args()
