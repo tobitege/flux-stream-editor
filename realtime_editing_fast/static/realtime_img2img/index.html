@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FLUX.2 Realtime Img2Img</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #1b2028;
+      --panel-2: #232a35;
+      --line: #3a4455;
+      --text: #e7edf7;
+      --muted: #a8b5ca;
+      --accent: #7ec4ff;
+      --danger: #ff9aa2;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+      background: radial-gradient(circle at 15% 15%, #1f314a 0, var(--bg) 40%),
+                  radial-gradient(circle at 80% 85%, #2a1f44 0, var(--bg) 45%);
+    }
+
+    .wrap {
+      max-width: 1360px;
+      margin: 0 auto;
+      padding: 18px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .card {
+      background: linear-gradient(165deg, var(--panel), var(--panel-2));
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 10px 22px rgba(0, 0, 0, 0.25);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(21px, 3vw, 30px);
+    }
+
+    .sub {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .controls {
+      display: grid;
+      gap: 9px;
+    }
+
+    .row {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: 1fr;
+    }
+
+    @media (min-width: 980px) {
+      .row.row-1 {
+        grid-template-columns: minmax(340px, 1fr) 180px 140px 160px 130px;
+      }
+
+      .row.row-2 {
+        grid-template-columns: 180px 180px 1fr;
+      }
+    }
+
+    input, button, select {
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #141a22;
+      color: var(--text);
+      font-size: 14px;
+      padding: 10px 12px;
+    }
+
+    input:focus, select:focus {
+      outline: 1px solid var(--accent);
+      border-color: var(--accent);
+    }
+
+    button {
+      cursor: pointer;
+      transition: 150ms ease;
+    }
+
+    button:hover { transform: translateY(-1px); border-color: var(--accent); }
+
+    button:disabled { cursor: not-allowed; opacity: 0.6; transform: none; }
+
+    .status { color: var(--muted); font-size: 13px; min-height: 20px; }
+    .status.error { color: var(--danger); }
+
+    .stats {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .pill {
+      border: 1px solid rgba(126, 196, 255, 0.25);
+      background: rgba(126, 196, 255, 0.12);
+      border-radius: 999px;
+      padding: 4px 9px;
+    }
+
+    .viewer {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: 1fr;
+    }
+
+    @media (min-width: 900px) {
+      .viewer { grid-template-columns: 1fr 1fr; }
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+      background: #0f1318;
+      position: relative;
+      min-height: 280px;
+    }
+
+    .panel video,
+    .panel img {
+      width: 100%;
+      height: 100%;
+      min-height: 280px;
+      object-fit: cover;
+      display: block;
+    }
+
+    .panel .tag {
+      position: absolute;
+      left: 8px;
+      bottom: 8px;
+      font-size: 12px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.2);
+      background: rgba(0,0,0,0.45);
+    }
+
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="card">
+      <h1>FLUX.2 Realtime Img2Img</h1>
+      <div class="sub">Streaming img2img demo: live webcam/screen feed -> realtime editing in your browser.</div>
+      <div class="gpu-info" id="gpu-info" style="margin-top: 8px; font-size: 13px; color: var(--muted);">
+        <span class="pill" id="gpu-badge" style="display: none;">GPU: Detecting...</span>
+      </div>
+    </section>
+
+    <section class="card controls">
+      <div class="row row-1">
+        <input id="prompt" type="text" list="prompt-suggestions" value="Convert this live frame into a cinematic anime illustration with clean lines and rich color." placeholder="Enter prompt or choose from list..." />
+        <datalist id="prompt-suggestions">
+          <option value="Convert this live frame into a cinematic anime illustration with clean lines and rich color.">Anime</option>
+          <option value="Convert this live frame into a Pixar-style 3D render">Pixar 3D</option>
+          <option value="Convert this live frame into a Studio Ghibli-style scene">Ghibli</option>
+          <option value="Convert this live frame into a Barbie Dreamhouse glossy look">Barbie</option>
+          <option value="Convert this live frame into a cute cartoon style look">Cute Cartoon</option>
+          <option value="Convert this live frame into a vintage 90s VHS camcorder look">90s VHS</option>
+          <option value="Convert this live frame into a LEGO stop-motion style">LEGO</option>
+          <option value="Convert this live frame into a claymation style">Claymation</option>
+          <option value="Convert this live frame into a watercolor storybook style">Watercolor</option>
+          <option value="Convert this live frame into a neon outline glow style">Neon</option>
+          <option value="Convert this live frame into a dreamy soft-focus K-drama style">K-drama</option>
+          <option value="Convert this live frame into a low-poly 3D game style">Low-poly</option>
+          <option value="Convert this live frame into a pixel art game style">Pixel Art</option>
+          <option value="Convert this live frame into a holographic chrome Y2K style">Holographic</option>
+          <option value="Replace my glasses with heart-shaped sunglasses">Heart Sunglasses</option>
+          <option value="Replace my glasses with neon visor glasses">Neon Visor</option>
+          <option value="Replace my glasses with VR headset">VR Headset</option>
+          <option value="Add devil horns">Devil Horns</option>
+          <option value="Add a floating halo above my head">Halo</option>
+          <option value="Add cat ears">Cat Ears</option>
+          <option value="Add a red cape">Red Cape</option>
+        </datalist>
+        <select id="source-mode">
+          <option value="webcam">Webcam</option>
+          <option value="screen">Screen</option>
+        </select>
+        <input id="seed" type="number" value="0" step="1" />
+        <button id="load-btn">Load Model</button>
+        <button id="start-btn">Start</button>
+      </div>
+      <div class="row row-2">
+        <button id="stop-btn" disabled>Stop</button>
+        <input id="target-fps" type="number" value="7" min="1" max="30" step="1" />
+        <div class="status" id="status">Click "Load Model" then "Start".</div>
+      </div>
+      <div class="stats" id="stats">
+        <span class="pill">Infer latency: -</span>
+        <span class="pill">Infer FPS: -</span>
+        <span class="pill">Loop FPS: -</span>
+        <span class="pill">Frames: 0</span>
+      </div>
+    </section>
+
+    <section class="card viewer">
+      <div class="panel">
+        <video id="video" autoplay playsinline muted></video>
+        <div class="tag">Input</div>
+      </div>
+      <div class="panel">
+        <img id="output" alt="Edited output" />
+        <div class="tag">Output</div>
+      </div>
+    </section>
+  </main>
+
+  <canvas id="capture-canvas" width="512" height="512" class="hidden"></canvas>
+
+  <script>
+    const promptEl = document.getElementById("prompt");
+    const sourceModeEl = document.getElementById("source-mode");
+    const seedEl = document.getElementById("seed");
+    const loadBtn = document.getElementById("load-btn");
+    const startBtn = document.getElementById("start-btn");
+    const stopBtn = document.getElementById("stop-btn");
+    const targetFpsEl = document.getElementById("target-fps");
+    const statusEl = document.getElementById("status");
+    const statsEl = document.getElementById("stats");
+    const videoEl = document.getElementById("video");
+    const outputEl = document.getElementById("output");
+    const canvasEl = document.getElementById("capture-canvas");
+    const ctx = canvasEl.getContext("2d", { willReadFrequently: false });
+
+    let stream = null;
+    let running = false;
+    let inFlight = false;
+    let frameCount = 0;
+    let loopTimer = null;
+    let lastLoopTs = null;
+    let emaFps = null;
+
+    function setStatus(text, isError = false) {
+      statusEl.textContent = text;
+      statusEl.classList.toggle("error", isError);
+    }
+
+    function setStats(latencyMs, inferFps, loopFps, frames) {
+      const lat = Number.isFinite(latencyMs) ? `${latencyMs.toFixed(0)} ms` : "-";
+      const ifps = Number.isFinite(inferFps) ? `${inferFps.toFixed(2)}` : "-";
+      const fps = Number.isFinite(loopFps) ? `${loopFps.toFixed(2)}` : "-";
+      statsEl.innerHTML = [
+        `Infer latency: ${lat}`,
+        `Infer FPS: ${ifps}`,
+        `Loop FPS: ${fps}`,
+        `Frames: ${frames}`,
+      ].map((v) => `<span class=\"pill\">${v}</span>`).join("");
+    }
+
+    function parseSeed() {
+      const v = Number(seedEl.value);
+      return Number.isFinite(v) ? Math.trunc(v) : 0;
+    }
+
+    function parseTargetFps() {
+      const v = Number(targetFpsEl.value);
+      if (!Number.isFinite(v)) return 7;
+      return Math.max(1, Math.min(30, Math.trunc(v)));
+    }
+
+    async function loadModel() {
+      loadBtn.disabled = true;
+      setStatus("Loading model...");
+      try {
+        const res = await fetch("/api/load", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        const data = await res.json();
+        setStatus(`Model loaded. backend=${data.attention_backend}`);
+      } catch (err) {
+        setStatus(`Load failed: ${err}`, true);
+      } finally {
+        loadBtn.disabled = false;
+      }
+    }
+
+    async function startInputStream() {
+      stopInputStream();
+      const mode = sourceModeEl.value;
+      if (mode === "screen") {
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: { frameRate: { ideal: 15, max: 30 } },
+          audio: false,
+        });
+      } else {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "user", frameRate: { ideal: 15, max: 30 } },
+          audio: false,
+        });
+      }
+      videoEl.srcObject = stream;
+      await videoEl.play();
+    }
+
+    function stopInputStream() {
+      if (stream) {
+        for (const track of stream.getTracks()) track.stop();
+      }
+      stream = null;
+      videoEl.srcObject = null;
+    }
+
+    function captureCurrentFrameDataUrl() {
+      if (!videoEl.videoWidth || !videoEl.videoHeight) {
+        return null;
+      }
+
+      const w = canvasEl.width;
+      const h = canvasEl.height;
+      ctx.drawImage(videoEl, 0, 0, w, h);
+      return canvasEl.toDataURL("image/jpeg", 0.85);
+    }
+
+    async function inferOneFrame() {
+      if (!running || inFlight) return;
+
+      const imageDataUrl = captureCurrentFrameDataUrl();
+      if (!imageDataUrl) return;
+
+      inFlight = true;
+      const t0 = performance.now();
+      try {
+        const res = await fetch("/api/predict", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            base64_image: imageDataUrl,
+            prompt: (promptEl.value || "").trim(),
+            seed: parseSeed(),
+          }),
+        });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+
+        const data = await res.json();
+        outputEl.src = `data:image/jpeg;base64,${data.base64_image}`;
+
+        frameCount += 1;
+        const now = performance.now();
+        if (lastLoopTs != null) {
+          const inst = 1000 / Math.max(1, now - lastLoopTs);
+          emaFps = emaFps == null ? inst : (0.3 * inst + 0.7 * emaFps);
+        }
+        lastLoopTs = now;
+        const inferFps = 1000 / Math.max(1e-6, Number(data.total_ms));
+        setStats(data.total_ms, inferFps, emaFps, frameCount);
+        setStatus(`Running... req=${data.request_tag} total=${data.total_ms.toFixed(1)}ms`);
+      } catch (err) {
+        setStatus(`Inference failed: ${err}`, true);
+      } finally {
+        inFlight = false;
+      }
+    }
+
+    function scheduleLoop() {
+      const fps = parseTargetFps();
+      const interval = Math.round(1000 / fps);
+      if (loopTimer) window.clearInterval(loopTimer);
+      loopTimer = window.setInterval(inferOneFrame, interval);
+    }
+
+    async function start() {
+      if (running) return;
+      try {
+        await startInputStream();
+        running = true;
+        frameCount = 0;
+        lastLoopTs = null;
+        emaFps = null;
+        setStats(null, null, null, 0);
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        scheduleLoop();
+        setStatus("Realtime img2img started.");
+      } catch (err) {
+        running = false;
+        setStatus(`Start failed: ${err}`, true);
+      }
+    }
+
+    function stop() {
+      running = false;
+      inFlight = false;
+      if (loopTimer) {
+        window.clearInterval(loopTimer);
+        loopTimer = null;
+      }
+      stopInputStream();
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      setStatus("Stopped.");
+    }
+
+    loadBtn.addEventListener("click", loadModel);
+    startBtn.addEventListener("click", start);
+    stopBtn.addEventListener("click", stop);
+
+    targetFpsEl.addEventListener("change", () => {
+      if (running) {
+        scheduleLoop();
+      }
+    });
+
+    window.addEventListener("beforeunload", () => {
+      stop();
+    });
+
+    // Fetch and display GPU info on page load
+    async function fetchGPUInfo() {
+      try {
+        const res = await fetch("/api/gpu_info");
+        const data = await res.json();
+        const gpuBadge = document.getElementById("gpu-badge");
+        if (data.cuda_available && data.device_count > 0) {
+          gpuBadge.textContent = `GPU: ${data.device_name}`;
+          gpuBadge.style.display = "inline-block";
+        } else {
+          gpuBadge.textContent = "GPU: Not available";
+          gpuBadge.style.display = "inline-block";
+        }
+      } catch (err) {
+        console.error("Failed to fetch GPU info:", err);
+      }
+    }
+    fetchGPUInfo();
+  </script>
+</body>
+</html>

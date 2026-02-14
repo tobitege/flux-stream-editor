@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FLUX.2 Realtime Txt2Img</title>
+  <style>
+    :root {
+      --bg: #0d1412;
+      --panel: #12211c;
+      --panel-2: #1a2e27;
+      --line: #2f4f44;
+      --text: #e8f2ee;
+      --muted: #a3b9b0;
+      --accent: #9de0c3;
+      --danger: #ff8b8b;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(circle at 20% 20%, #173127 0%, var(--bg) 45%),
+                  radial-gradient(circle at 80% 80%, #1f3d32 0%, var(--bg) 50%);
+      color: var(--text);
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+    }
+
+    .wrap {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 20px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .card {
+      background: linear-gradient(160deg, var(--panel), var(--panel-2));
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 12px 26px rgba(0, 0, 0, 0.25);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(20px, 3vw, 28px);
+      letter-spacing: 0.3px;
+    }
+
+    .sub {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .controls {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: 1fr;
+    }
+
+    .row {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: 1fr;
+    }
+
+    @media (min-width: 900px) {
+      .row {
+        grid-template-columns: minmax(280px, 1fr) 140px 170px 150px 170px;
+      }
+    }
+
+    input, button {
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #102019;
+      color: var(--text);
+      font-size: 14px;
+      padding: 10px 12px;
+    }
+
+    input:focus {
+      outline: 1px solid var(--accent);
+      border-color: var(--accent);
+    }
+
+    button {
+      cursor: pointer;
+      transition: 160ms ease;
+    }
+
+    button:hover {
+      border-color: var(--accent);
+      transform: translateY(-1px);
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+      transform: none;
+    }
+
+    .inline {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      padding: 0 2px;
+    }
+
+    .status {
+      color: var(--muted);
+      font-size: 13px;
+      min-height: 20px;
+    }
+
+    .status.error {
+      color: var(--danger);
+    }
+
+    .stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .pill {
+      background: rgba(157, 224, 195, 0.1);
+      border: 1px solid rgba(157, 224, 195, 0.2);
+      border-radius: 999px;
+      padding: 5px 9px;
+    }
+
+    .grid {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    @media (min-width: 720px) {
+      .grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+    }
+
+    .cell {
+      position: relative;
+      overflow: hidden;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #0b120f;
+      aspect-ratio: 1 / 1;
+    }
+
+    .cell img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      opacity: 0;
+      transition: opacity 200ms ease;
+    }
+
+    .cell img.ready {
+      opacity: 1;
+    }
+
+    .tag {
+      position: absolute;
+      left: 8px;
+      bottom: 8px;
+      font-size: 11px;
+      color: #d4e8df;
+      background: rgba(0, 0, 0, 0.46);
+      border: 1px solid rgba(212, 232, 223, 0.2);
+      border-radius: 999px;
+      padding: 3px 8px;
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="card">
+      <h1>FLUX.2 Realtime Txt2Img</h1>
+      <div class="sub">Fast stack: 512x512, 2-step, cache-dit + TaylorSeer + torch.compile</div>
+    </section>
+
+    <section class="card controls">
+      <div class="row">
+        <input id="prompt" type="text" value="A cinematic photo of a corgi astronaut walking on Mars at golden hour." />
+        <input id="base-seed" type="number" value="0" step="1" />
+        <button id="load-btn">Load Model</button>
+        <button id="generate-btn">Generate 4x4</button>
+        <button id="clear-btn">Clear Grid</button>
+      </div>
+      <label class="inline"><input id="auto-run" type="checkbox" checked />Auto-generate when prompt changes</label>
+      <div id="status" class="status">Click "Load Model" first.</div>
+      <div class="stats" id="stats">
+        <span class="pill">Job: -</span>
+        <span class="pill">Tiles done: 0/16</span>
+        <span class="pill">Avg latency: -</span>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="grid" id="grid"></div>
+    </section>
+  </main>
+
+  <script>
+    const GRID_SIZE = 16;
+    const DEFAULT_TILE =
+      "data:image/svg+xml;base64," +
+      btoa("<svg xmlns='http://www.w3.org/2000/svg' width='512' height='512'><rect width='100%' height='100%' fill='#0b120f'/><text x='50%' y='50%' font-family='sans-serif' font-size='22' fill='#4f6e61' dominant-baseline='middle' text-anchor='middle'>waiting...</text></svg>");
+
+    const promptEl = document.getElementById("prompt");
+    const baseSeedEl = document.getElementById("base-seed");
+    const loadBtn = document.getElementById("load-btn");
+    const generateBtn = document.getElementById("generate-btn");
+    const clearBtn = document.getElementById("clear-btn");
+    const autoRunEl = document.getElementById("auto-run");
+    const statusEl = document.getElementById("status");
+    const statsEl = document.getElementById("stats");
+    const gridEl = document.getElementById("grid");
+
+    const tiles = [];
+    const controllers = [];
+    let lastPrompt = promptEl.value;
+    let jobId = 0;
+    let debounceTimer = null;
+
+    function setStatus(text, isError = false) {
+      statusEl.textContent = text;
+      statusEl.classList.toggle("error", isError);
+    }
+
+    function setStats(texts) {
+      statsEl.innerHTML = texts.map((t) => `<span class=\"pill\">${t}</span>`).join("");
+    }
+
+    function createGrid() {
+      for (let i = 0; i < GRID_SIZE; i += 1) {
+        const cell = document.createElement("div");
+        cell.className = "cell";
+
+        const img = document.createElement("img");
+        img.src = DEFAULT_TILE;
+        img.alt = `tile-${i}`;
+
+        const tag = document.createElement("div");
+        tag.className = "tag";
+        tag.textContent = `#${i}`;
+
+        cell.appendChild(img);
+        cell.appendChild(tag);
+        gridEl.appendChild(cell);
+
+        tiles.push({ img, tag });
+        controllers.push(null);
+      }
+    }
+
+    function clearGrid() {
+      for (const tile of tiles) {
+        tile.img.src = DEFAULT_TILE;
+        tile.img.classList.remove("ready");
+        tile.tag.textContent = tile.tag.textContent.split(" ")[0];
+      }
+      setStats(["Job: -", "Tiles done: 0/16", "Avg latency: -"]);
+    }
+
+    function parseBaseSeed() {
+      const value = Number(baseSeedEl.value);
+      if (Number.isFinite(value)) {
+        return Math.trunc(value);
+      }
+      return 0;
+    }
+
+    function abortAllRequests() {
+      for (let i = 0; i < controllers.length; i += 1) {
+        controllers[i]?.abort();
+        controllers[i] = null;
+      }
+    }
+
+    async function loadModel() {
+      loadBtn.disabled = true;
+      setStatus("Loading model...");
+      try {
+        const res = await fetch("/api/load", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ attention_backend: "sage" }),
+        });
+        const data = await res.json();
+        setStatus(`Model loaded. backend=${data.attention_backend}`);
+      } catch (err) {
+        setStatus(`Load failed: ${err}`, true);
+      } finally {
+        loadBtn.disabled = false;
+      }
+    }
+
+    async function generateOneTile(index, prompt, seed, activeJobId) {
+      const controller = new AbortController();
+      controllers[index]?.abort();
+      controllers[index] = controller;
+
+      const t0 = performance.now();
+      const res = await fetch("/api/predict", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt, seed }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const data = await res.json();
+
+      if (activeJobId !== jobId) {
+        return null;
+      }
+
+      const elapsed = performance.now() - t0;
+      const imageUrl = `data:image/jpeg;base64,${data.base64_image}`;
+      tiles[index].img.src = imageUrl;
+      tiles[index].img.classList.add("ready");
+      tiles[index].tag.textContent = `#${index} ${elapsed.toFixed(0)}ms`;
+      return elapsed;
+    }
+
+    async function runGeneration() {
+      const prompt = (promptEl.value || "").trim();
+      if (!prompt) {
+        setStatus("Prompt is empty.", true);
+        return;
+      }
+
+      jobId += 1;
+      const activeJobId = jobId;
+      const baseSeed = parseBaseSeed();
+      const started = performance.now();
+
+      abortAllRequests();
+      setStatus(`Generating job #${activeJobId} ...`);
+      setStats([`Job: #${activeJobId}`, "Tiles done: 0/16", "Avg latency: -"]);
+
+      let done = 0;
+      const latencies = [];
+      const indexes = Array.from({ length: GRID_SIZE }, (_, i) => i);
+      let cursor = 0;
+      const workerCount = 4;
+
+      async function worker() {
+        while (cursor < indexes.length && activeJobId === jobId) {
+          const i = indexes[cursor];
+          cursor += 1;
+          try {
+            const ms = await generateOneTile(i, prompt, baseSeed + i, activeJobId);
+            if (ms != null) {
+              latencies.push(ms);
+              done += 1;
+              const avg = latencies.reduce((a, b) => a + b, 0) / latencies.length;
+              setStats([
+                `Job: #${activeJobId}`,
+                `Tiles done: ${done}/16`,
+                `Avg latency: ${avg.toFixed(0)} ms`,
+              ]);
+            }
+          } catch (err) {
+            if (activeJobId !== jobId) {
+              return;
+            }
+            if (err?.name !== "AbortError") {
+              tiles[i].tag.textContent = `#${i} failed`;
+            }
+          }
+        }
+      }
+
+      await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+      if (activeJobId !== jobId) {
+        return;
+      }
+
+      const total = performance.now() - started;
+      setStatus(`Job #${activeJobId} finished in ${total.toFixed(0)} ms.`);
+    }
+
+    loadBtn.addEventListener("click", loadModel);
+    generateBtn.addEventListener("click", runGeneration);
+    clearBtn.addEventListener("click", () => {
+      abortAllRequests();
+      clearGrid();
+      setStatus("Grid cleared.");
+    });
+
+    promptEl.addEventListener("input", () => {
+      const current = (promptEl.value || "").trim();
+      if (!autoRunEl.checked) {
+        return;
+      }
+      if (current === lastPrompt) {
+        return;
+      }
+      lastPrompt = current;
+      window.clearTimeout(debounceTimer);
+      debounceTimer = window.setTimeout(() => {
+        runGeneration();
+      }, 280);
+    });
+
+    createGrid();
+  </script>
+</body>
+</html>
