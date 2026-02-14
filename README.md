@@ -130,7 +130,7 @@ python -m realtime_editing_fast.realtime_img2img_server \
 
 ### Performance Tips
 
-1. **Use SageAttention**: Install `sageattention==2.2.0` for **30-40% speedup** (RTX 4090: 10 FPS → 16 FPS)
+1. **Use SageAttention**: Install `sageattention==2.2.0` for **10-15% speedup**.
 2. **Enable torch.compile**: Essential for achieving target FPS on both RTX 4090 and H100
 3. **Prompt Caching**: Same prompts reuse cached embeddings (0ms overhead)
 4. **2-Step Inference**: Perfect balance of speed & quality for real-time stylization
