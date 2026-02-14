@@ -140,6 +140,8 @@ python -m realtime_editing_fast.realtime_img2img_server \
 3. **Prompt Caching**: Same prompts reuse cached embeddings (0ms overhead)
 4. **2-Step Inference**: Perfect balance of speed & quality for real-time stylization
 
+> Tip: In practice, **3-step inference** is much better than **2-step** in both visual quality and instruction following, but the FPS drops noticeably.
+
 ---
 
 ## 📊 Benchmarks
