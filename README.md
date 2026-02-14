@@ -38,7 +38,7 @@ Whether you're livestreaming, creating content, or just having fun with AI art, 
 
 **Tian Ye**  
 PhD Student @ HKUST(Guangzhou)  
-📧 [tye610@connect.hkust-gz.edu.cn] | 🐙 [About ME](https://owen718.github.io/)
+🐙 [About ME](https://owen718.github.io/)
 
 ---
 
