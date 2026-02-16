@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 import threading
 import time
 from typing import Optional
@@ -117,6 +118,11 @@ class FastFlux2Config:
     vae_decoder_compile_disable_cudagraphs: bool = True
     vae_decoder_channels_last: bool = False
     vae_decoder_input_channels_last: bool = False
+    enable_taef2: bool = False
+    taef2_cache_dir: str = ".cache/taef2"
+    taef2_taesd_py_path: str = ""
+    taef2_weight_path: str = ""
+    taef2_force_eager_vae: bool = True
     profile_stage_timing: bool = False
     verbose: bool = True
 
@@ -308,6 +314,98 @@ class FastFlux2RealtimeEditor:
         self._log("attention backend auto-selection failed; using model default/native behavior.")
         return "native"
 
+    def _maybe_enable_taef2_vae(
+        self,
+        pipe,
+        runtime_device: str,
+        dtype: torch.dtype,
+    ) -> None:
+        cfg = self.config
+        if not cfg.enable_taef2:
+            return
+
+        try:
+            from .taef2 import build_taef2_diffusers_vae, ensure_taef2_artifacts
+        except Exception as exc:
+            raise RuntimeError("TAEF2 requested but helper module import failed.") from exc
+
+        taesd_py_path_cfg = (cfg.taef2_taesd_py_path or "").strip() or None
+        taef2_weight_path_cfg = (cfg.taef2_weight_path or "").strip() or None
+        cache_dir = Path(cfg.taef2_cache_dir or ".cache/taef2")
+        taesd_py_path, taef2_weight_path = ensure_taef2_artifacts(
+            cache_dir=cache_dir,
+            taesd_py_path=taesd_py_path_cfg,
+            taef2_weight_path=taef2_weight_path_cfg,
+        )
+
+        bn_channels = 128
+        batch_norm_eps = 0.0
+        if hasattr(pipe.vae, "bn") and hasattr(pipe.vae.bn, "running_mean"):
+            bn_channels = int(pipe.vae.bn.running_mean.shape[0])
+            batch_norm_eps = float(getattr(pipe.vae.bn, "eps", 0.0))
+        elif hasattr(pipe.vae, "config") and hasattr(pipe.vae.config, "batch_norm_eps"):
+            batch_norm_eps = float(pipe.vae.config.batch_norm_eps)
+
+        pipe.vae = build_taef2_diffusers_vae(
+            taesd_py_path=taesd_py_path,
+            taef2_weight_path=taef2_weight_path,
+            device=runtime_device,
+            dtype=dtype,
+            bn_channels=bn_channels,
+            batch_norm_eps=batch_norm_eps,
+        )
+        self._image_latent_ids_cache.clear()
+        self._log(
+            "TAEF2 enabled: "
+            f"weights={taef2_weight_path}, taesd={taesd_py_path}, force_eager_vae={cfg.taef2_force_eager_vae}"
+        )
+
+        if cfg.taef2_force_eager_vae:
+            cfg.enable_vae_encoder_compile = False
+            cfg.enable_vae_decoder_compile = False
+            self._log("TAEF2 forcing VAE eager paths (encoder/decoder compile disabled).")
+
+    def _configure_vae_runtime(self, pipe) -> None:
+        cfg = self.config
+
+        if cfg.vae_decoder_channels_last and hasattr(pipe.vae, "decoder"):
+            pipe.vae.decoder.to(memory_format=torch.channels_last)
+            self._log("vae decoder memory_format=channels_last")
+
+        def _encode_fn(image: torch.Tensor, generator: torch.Generator) -> torch.Tensor:
+            return pipe._encode_vae_image(image=image, generator=generator)
+
+        if cfg.enable_vae_encoder_compile:
+            if cfg.vae_encoder_compile_disable_cudagraphs:
+                encode_compile_kwargs = {"fullgraph": False, "options": {"triton.cudagraphs": False}}
+            else:
+                encode_compile_kwargs = {"mode": cfg.vae_encoder_compile_mode, "fullgraph": False}
+            try:
+                self._vae_encode_fn = torch.compile(_encode_fn, **encode_compile_kwargs)
+                self._log(f"vae encoder compiled: kwargs={encode_compile_kwargs}")
+            except Exception as exc:
+                self._vae_encode_fn = _encode_fn
+                self._log(f"vae encoder compile fallback to eager: {exc!r}")
+        else:
+            self._vae_encode_fn = _encode_fn
+
+        def _decode_fn(latents: torch.Tensor) -> torch.Tensor:
+            return pipe.vae.decode(latents, return_dict=False)[0]
+
+        if cfg.enable_vae_decoder_compile:
+            if cfg.vae_decoder_compile_disable_cudagraphs:
+                decode_compile_kwargs = {"fullgraph": False, "options": {"triton.cudagraphs": False}}
+            else:
+                decode_compile_kwargs = {"mode": cfg.vae_decoder_compile_mode, "fullgraph": False}
+            try:
+                self._vae_decode_fn = torch.compile(_decode_fn, **decode_compile_kwargs)
+                self._log(f"vae decoder compiled: kwargs={decode_compile_kwargs}")
+            except Exception as exc:
+                self._vae_decode_fn = _decode_fn
+                self._log(f"vae decoder compile fallback to eager: {exc!r}")
+        else:
+            self._vae_decode_fn = _decode_fn
+
     def ensure_loaded(self) -> None:
         if self._pipe is not None:
             return
@@ -393,6 +491,12 @@ class FastFlux2RealtimeEditor:
             else:
                 cfg.attention_backend = requested_attention_backend
 
+            self._maybe_enable_taef2_vae(
+                pipe=pipe,
+                runtime_device=runtime_device,
+                dtype=dtype,
+            )
+
             if cfg.enable_cache_dit:
                 self._enable_cache_dit(pipe)
 
@@ -408,43 +512,7 @@ class FastFlux2RealtimeEditor:
                 pipe.transformer = torch.compile(pipe.transformer, **compile_kwargs)
                 self._log(f"transformer compiled: kwargs={compile_kwargs}")
 
-            if cfg.vae_decoder_channels_last:
-                pipe.vae.decoder.to(memory_format=torch.channels_last)
-                self._log("vae decoder memory_format=channels_last")
-
-            def _encode_fn(image: torch.Tensor, generator: torch.Generator) -> torch.Tensor:
-                return pipe._encode_vae_image(image=image, generator=generator)
-
-            if cfg.enable_vae_encoder_compile:
-                if cfg.vae_encoder_compile_disable_cudagraphs:
-                    encode_compile_kwargs = {"fullgraph": False, "options": {"triton.cudagraphs": False}}
-                else:
-                    encode_compile_kwargs = {"mode": cfg.vae_encoder_compile_mode, "fullgraph": False}
-                try:
-                    self._vae_encode_fn = torch.compile(_encode_fn, **encode_compile_kwargs)
-                    self._log(f"vae encoder compiled: kwargs={encode_compile_kwargs}")
-                except Exception as exc:
-                    self._vae_encode_fn = _encode_fn
-                    self._log(f"vae encoder compile fallback to eager: {exc!r}")
-            else:
-                self._vae_encode_fn = _encode_fn
-
-            def _decode_fn(latents: torch.Tensor) -> torch.Tensor:
-                return pipe.vae.decode(latents, return_dict=False)[0]
-
-            if cfg.enable_vae_decoder_compile:
-                if cfg.vae_decoder_compile_disable_cudagraphs:
-                    decode_compile_kwargs = {"fullgraph": False, "options": {"triton.cudagraphs": False}}
-                else:
-                    decode_compile_kwargs = {"mode": cfg.vae_decoder_compile_mode, "fullgraph": False}
-                try:
-                    self._vae_decode_fn = torch.compile(_decode_fn, **decode_compile_kwargs)
-                    self._log(f"vae decoder compiled: kwargs={decode_compile_kwargs}")
-                except Exception as exc:
-                    self._vae_decode_fn = _decode_fn
-                    self._log(f"vae decoder compile fallback to eager: {exc!r}")
-            else:
-                self._vae_decode_fn = _decode_fn
+            self._configure_vae_runtime(pipe)
 
             self._pipe = pipe
             self._sync_if_cuda(force=True)
@@ -571,7 +639,12 @@ class FastFlux2RealtimeEditor:
         if self._vae_decode_fn is None:
             image = pipe.vae.decode(latents, return_dict=False)[0]
         else:
-            image = self._vae_decode_fn(latents)
+            try:
+                image = self._vae_decode_fn(latents)
+            except Exception as exc:
+                self._log(f"vae decoder compiled path failed, fallback to eager: {exc!r}")
+                self._vae_decode_fn = None
+                image = pipe.vae.decode(latents, return_dict=False)[0]
         return pipe.image_processor.postprocess(image, output_type="pil")[0]
 
     def _preprocess_image_tensor(

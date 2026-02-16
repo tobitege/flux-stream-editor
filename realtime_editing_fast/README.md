@@ -50,6 +50,21 @@ python -m realtime_editing_fast.realtime_img2img_server --host 0.0.0.0 --port 78
 
 Then open `http://localhost:7870`.
 
+## TAEF2 Switch
+
+Enable TAEF2 VAE for realtime acceleration:
+
+```bash
+FLUX_USE_TAEF2=1 python -m realtime_editing_fast.realtime_img2img_server --host 0.0.0.0 --port 7870 --num-inference-steps 2
+```
+
+Optional env knobs:
+
+- `FLUX_TAEF2_FORCE_EAGER_VAE` (default `1`): disable VAE encode/decode compile when TAEF2 is enabled.
+- `FLUX_TAEF2_CACHE_DIR` (default `.cache/taef2`): cache path for `taesd.py` and `taef2.safetensors`.
+- `FLUX_TAEF2_SCRIPT_PATH`: explicit local path for `taesd.py`.
+- `FLUX_TAEF2_WEIGHT_PATH`: explicit local path for `taef2.safetensors`.
+
 If `gradio` is missing:
 
 ```bash

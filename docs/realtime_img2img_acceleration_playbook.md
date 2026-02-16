@@ -167,6 +167,30 @@ Also integrated into external benchmark harness:
 
 - `tests/test_vae_decode_accel_external.py`
 
+## 5.5 TAEF2 integration (optional VAE replacement)
+
+### Changes
+
+Integrated TAEF2 as an optional runtime VAE path in `realtime_editing_fast`:
+
+- new helper module: `realtime_editing_fast/taef2.py`
+- editor switch: `FastFlux2Config.enable_taef2`
+- automatic artifact handling (`taesd.py` + `taef2.safetensors`) with local cache
+- VAE compile fallback guards retained for stability
+
+Runtime env switches:
+
+- `FLUX_USE_TAEF2=1`
+- `FLUX_TAEF2_FORCE_EAGER_VAE` (default `1`)
+- `FLUX_TAEF2_CACHE_DIR`
+- optional explicit artifact paths:
+  - `FLUX_TAEF2_SCRIPT_PATH`
+  - `FLUX_TAEF2_WEIGHT_PATH`
+
+### Why this matters
+
+TAEF2 primarily reduces VAE encode/decode cost (prepare/decode stages), which directly improves end-to-end realtime FPS in 2-step workloads.
+
 ## 6. Current Defaults
 
 Default config now enables compile across critical modules:
@@ -261,6 +285,43 @@ Decision:
 
 - recommend `auto` (which prefers FA3), and use `fa3` explicitly when pinning backend for controlled experiments.
 
+### 7.6 Latest TAEF2 External A/B (FA3, 2-step, same harness)
+
+Measurement date:
+
+- **2026-02-16**
+
+External harness:
+
+- `tests/test_vae_decode_accel_external.py`
+- `warmup=5`, `runs=20`, `num_inference_steps=2`, `attention_backend=fa3`
+
+Results:
+
+| Case | server total (ms) | prepare (ms) | denoise (ms) | decode (ms) | FPS |
+|---|---:|---:|---:|---:|---:|
+| Baseline (`FLUX_USE_TAEF2=0`, VAE compile on) | 70.40 | 16.82 | 34.69 | 18.89 | 14.21 |
+| TAEF2 eager-VAE (`FLUX_USE_TAEF2=1`, `FLUX_TAEF2_FORCE_EAGER_VAE=1`) | 56.79 | 12.54 | 33.63 | 10.63 | 17.61 |
+| TAEF2 + VAE compile (`FLUX_USE_TAEF2=1`, `FLUX_TAEF2_FORCE_EAGER_VAE=0`) | 53.55 | 11.94 | 33.69 | 7.91 | 18.67 |
+
+Delta summary:
+
+- TAEF2 eager vs baseline:
+  - `-13.60ms` total (`70.40 -> 56.79`)
+  - `+3.40 FPS` (`14.21 -> 17.61`, about `+23.9%`)
+- TAEF2 + compile vs baseline:
+  - `-16.85ms` total (`70.40 -> 53.55`)
+  - `+4.46 FPS` (`14.21 -> 18.67`, about `+31.5%`)
+- TAEF2 + compile vs TAEF2 eager:
+  - extra `-3.25ms` total
+  - extra `+1.06 FPS` (about `+6.0%`)
+
+Interpretation:
+
+- most gain still comes from VAE path shrink (prepare/decode)
+- denoise remains nearly unchanged
+- in this setup, **TAEF2 + compile is the best measured option**
+
 Diagnostic profile split (`FLUX_PROFILE_STAGE=1`, sync-instrumented; use for attribution, not direct SLO):
 
 | Prepare sub-stage | avg latency (ms) |
@@ -325,6 +386,20 @@ FLUX_VAE_ENCODE_COMPILE=0 python -m realtime_editing_fast.realtime_img2img_serve
 
 ```bash
 FLUX_PROFILE_STAGE=1 python -m realtime_editing_fast.realtime_img2img_server --host 127.0.0.1 --port 6006 --num-inference-steps 2
+```
+
+## 9.4 Enable TAEF2
+
+Default (stability first, VAE eager):
+
+```bash
+FLUX_USE_TAEF2=1 FLUX_TAEF2_FORCE_EAGER_VAE=1 python -m realtime_editing_fast.realtime_img2img_server --host 127.0.0.1 --port 6006 --num-inference-steps 2 --attention-backend fa3
+```
+
+TAEF2 with VAE compile enabled:
+
+```bash
+FLUX_USE_TAEF2=1 FLUX_TAEF2_FORCE_EAGER_VAE=0 python -m realtime_editing_fast.realtime_img2img_server --host 127.0.0.1 --port 6006 --num-inference-steps 2 --attention-backend fa3
 ```
 
 ## 10. Why We Did Not Pursue More Scheduling Complexity

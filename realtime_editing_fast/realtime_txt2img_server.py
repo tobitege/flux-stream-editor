@@ -150,6 +150,11 @@ def build_default_config(attention_backend: str = "auto") -> FastFlux2Config:
     enable_vae_encoder_compile = _env_bool("FLUX_VAE_ENCODE_COMPILE", True)
     vae_encoder_compile_disable_cudagraphs = _env_bool("FLUX_VAE_ENCODE_DISABLE_CUDAGRAPHS", True)
     vae_encoder_compile_mode = os.getenv("FLUX_VAE_ENCODE_COMPILE_MODE", "reduce-overhead").strip() or "reduce-overhead"
+    enable_taef2 = _env_bool("FLUX_USE_TAEF2", False)
+    taef2_force_eager_vae = _env_bool("FLUX_TAEF2_FORCE_EAGER_VAE", True)
+    taef2_cache_dir = os.getenv("FLUX_TAEF2_CACHE_DIR", ".cache/taef2").strip() or ".cache/taef2"
+    taef2_taesd_py_path = os.getenv("FLUX_TAEF2_SCRIPT_PATH", "").strip()
+    taef2_weight_path = os.getenv("FLUX_TAEF2_WEIGHT_PATH", "").strip()
     cache_timesteps = _env_bool("FLUX_CACHE_TIMESTEPS", True)
     cache_image_latent_ids = _env_bool("FLUX_CACHE_IMAGE_LATENT_IDS", True)
     return FastFlux2Config(
@@ -180,6 +185,11 @@ def build_default_config(attention_backend: str = "auto") -> FastFlux2Config:
         vae_decoder_compile_disable_cudagraphs=vae_decoder_compile_disable_cudagraphs,
         vae_decoder_channels_last=vae_decoder_channels_last,
         vae_decoder_input_channels_last=vae_decoder_input_channels_last,
+        enable_taef2=enable_taef2,
+        taef2_cache_dir=taef2_cache_dir,
+        taef2_taesd_py_path=taef2_taesd_py_path,
+        taef2_weight_path=taef2_weight_path,
+        taef2_force_eager_vae=taef2_force_eager_vae,
         profile_stage_timing=profile_stage_timing,
     )
 

@@ -1,1 +1,1 @@
-python -m realtime_editing_fast.realtime_img2img_server --host 127.0.0.1 --port 6006 --num-inference-steps 2
+python -m realtime_editing_fast.realtime_img2img_server --host 127.0.0.1 --port 6006 --num-inference-steps 2 --attention-backend fa3
