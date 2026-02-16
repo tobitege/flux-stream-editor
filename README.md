@@ -179,8 +179,8 @@ Contributions are welcome! Areas we'd love help with:
 ---
 
 ## 📜 License
+This project is released under a Non-Commercial License. Commercial use is prohibited without explicit permission from the author. See `LICENSE`.
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## 🙏 Acknowledgments
 
