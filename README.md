@@ -56,8 +56,8 @@ PhD Student @ HKUST(Guangzhou)
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/fastflux2-realtime-editor.git
-cd fastflux2-realtime-editor
+git clone https://github.com/Owen718/flux-stream-editor.git
+cd flux-stream-editor
 
 # Install dependencies
 pip install torch==2.6.0+cu126 torchvision==0.21.0+cu126 --index-url https://download.pytorch.org/whl/cu126
